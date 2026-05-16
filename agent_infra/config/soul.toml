@@ -1,0 +1,150 @@
+# ═══════════════════════════════════════════════════════════
+#  SOUL.TOML — 你的 Agent 人格与配置文件
+#  类比: 这是贾维斯的"灵魂"，定义他是谁、怎么工作
+# ═══════════════════════════════════════════════════════════
+
+[identity]
+name        = "Jarvis"
+owner       = "User"
+language    = "zh"          # 默认回复语言
+timezone    = "Asia/Shanghai"
+
+[identity.persona]
+# 贾维斯的性格定义：客观、精准、主动、不废话
+style       = "concise"     # concise | detailed | socratic
+tone        = "direct"      # direct | friendly | formal
+proactive   = true          # 主动推送洞察，不等你问
+
+
+# ─── LLM 路由（零成本优先策略）─────────────────────────────
+[llm]
+# ────────────────────────────────────────────────────────────
+# 优先级: claude_cli > codex_cli > ollama > claude_api
+#
+# 零成本方案（推荐）:
+#   1. 安装 Claude Code: npm install -g @anthropic-ai/claude-code
+#      → 使用你的 Claude Pro/Max 订阅，零额外费用
+#   2. 安装 Ollama: brew install ollama && ollama pull hermes3
+#      → 本地免费运行，简单任务专用
+#
+# Claude API Key 是可选的兜底，不是必须的
+# ────────────────────────────────────────────────────────────
+
+# 订阅 CLI（零成本，优先使用）
+# claude_cli 使用你的 Claude Pro/Max 订阅（claude 命令）
+# codex_cli  使用你的 Codex Pro 订阅（codex 命令）
+
+# 主模型（API 兜底，有 API Key 时生效）
+primary       = "claude"
+primary_model = "claude-sonnet-4-6"
+
+# 本地模型：简单任务，免费，隐私安全
+local       = "ollama"
+local_model = "hermes3"     # Ollama 拉取: ollama pull hermes3
+local_url   = "http://localhost:11434"
+
+# 路由策略
+fallback_to_local = true    # 订阅 CLI 失败时自动切本地
+local_for_simple  = true    # 简单任务优先走本地（免费+快）
+
+
+# ─── 记忆配置 ──────────────────────────────────────────────
+[memory]
+# 情节记忆：你做过什么
+episodic_db     = "~/.jarvis/episodic.db"   # SQLite 路径
+
+# 语义记忆：你知道什么（Obsidian vault）
+obsidian_vault  = "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Vault"
+obsidian_inbox  = "Jarvis Inbox"            # agent 写入的默认文件夹
+obsidian_index  = "~/.jarvis/semantic.db"   # RAG 索引缓存（DuckDB）
+
+# 工作记忆保留时长
+working_memory_ttl_hours = 24
+
+# 情节记忆保留天数
+episodic_retention_days = 365
+
+
+# ─── 感知配置 ──────────────────────────────────────────────
+[capture]
+# 剪贴板监听
+clipboard_enabled       = true
+clipboard_min_length    = 50        # 少于50字不记录（过滤无意义复制）
+
+# 文件监视
+file_watch_enabled      = true
+file_watch_paths        = ["~/Desktop", "~/Documents", "~/code"]
+file_watch_extensions   = [".py", ".js", ".ts", ".md", ".txt"]
+
+# Claude Code Hook（自动捕获所有 Claude Code 对话）
+claude_code_enabled     = true
+
+# CLI 命令捕获
+cli_enabled             = true
+cli_ignore_commands     = ["ls", "pwd", "cd", "clear", "history"]
+
+# 最小捕获间隔（秒）防止刷屏
+min_capture_interval_s  = 2
+
+
+# ─── 反哺配置（混合模式 A）─────────────────────────────────
+[augmentation]
+mode                = "mixed"   # mixed | push | pull
+
+# 即时反哺：完成一件事后多少秒内推送
+instant_delay_s     = 5        # 等5秒，避免打断你
+
+# 是否推送到桌面通知
+notify_desktop      = true
+notify_voice        = false    # 暂时关闭，接 Omi 后开启
+
+# 触发反哺的最低"重要性"评分 (0-1)
+importance_threshold = 0.6
+
+# 每次最多推送多少条洞察
+max_insights_per_event = 3
+
+
+# ─── 日报配置 ─────────────────────────────────────────────
+[digest]
+enabled             = true
+schedule            = "08:00"   # 每天早上8点
+write_to_obsidian   = true
+obsidian_folder     = "Jarvis Inbox/Daily Digest"
+notify_voice        = false
+
+
+# ─── 自愈配置 ─────────────────────────────────────────────
+[healing]
+# 熔断器：连续失败多少次后熔断
+circuit_breaker_threshold   = 3
+circuit_breaker_timeout_s   = 60    # 熔断后多久重试
+
+# 健康检查间隔
+health_check_interval_s     = 30
+
+# 崩溃后自动重启
+auto_restart                = true
+
+
+# ─── 自我维护配置 ─────────────────────────────────────────
+[maintenance]
+# 每天自动检查代码健康
+enabled             = true
+schedule            = "03:00"       # 每天凌晨 3 点运行（不打扰你）
+auto_fix            = true          # 自动修复可修复的问题（lint 等）
+llm_review          = true          # 用订阅 CLI 做代码审查
+write_to_obsidian   = true          # 维护报告写入 Obsidian
+notify_if_errors    = true          # 发现严重问题时桌面通知
+
+
+# ─── 隐私配置 ─────────────────────────────────────────────
+[privacy]
+# 不发送到云端 API 的内容（走本地模型）
+local_only_patterns = [
+    "password", "密码", "token", "secret",
+    "身份证", "银行", "私钥"
+]
+
+# 不捕获的应用（黑名单）
+capture_blacklist_apps = ["1Password", "Keychain"]
