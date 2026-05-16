@@ -73,6 +73,10 @@ class BaseAdapter(ABC):
     async def stop(self) -> None:
         self._running = False
 
+    async def is_alive(self) -> bool:
+        """健康检查：适配器是否仍在运行。供 HealthMonitor 调用。"""
+        return self._running
+
     @abstractmethod
     async def run(self) -> None:
         """子类实现：持续监听并 emit 事件。"""

@@ -141,6 +141,51 @@ class TaskRegistry:
         except (OSError, ProcessLookupError):
             return False
 
+    def get_missed_tasks(self) -> list[str]:
+        """
+        返回关机期间漏掉的任务 ID 列表。
+
+        判断逻辑：
+          - 找到该任务「今天最近一次应执行时刻」（若还未到则取昨天）
+          - 若 last_run 早于该时刻（或从未运行），则视为漏跑
+        """
+        from datetime import timedelta
+        data = self._load()
+        now = datetime.now(timezone.utc)
+        missed: list[str] = []
+
+        for task_id, info in data.get("tasks", {}).items():
+            schedule = info.get("schedule", "")
+            last_run_iso = info.get("last_run", "")
+            last_status = info.get("last_status", "never")
+
+            if not schedule:
+                continue
+            if last_status == "running":
+                continue   # 正在跑，不补跑
+
+            try:
+                h, m = map(int, schedule.split(":"))
+                # 最近一次应执行时刻（今天，若还没到则取昨天）
+                scheduled_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if scheduled_today > now:
+                    scheduled_today -= timedelta(days=1)
+
+                if not last_run_iso:
+                    missed.append(task_id)
+                    continue
+
+                last_run_dt = datetime.fromisoformat(last_run_iso)
+                if last_run_dt.tzinfo is None:
+                    last_run_dt = last_run_dt.replace(tzinfo=timezone.utc)
+
+                if last_run_dt < scheduled_today:
+                    missed.append(task_id)
+            except Exception:
+                pass
+
+        return missed
+
 
 _registry: TaskRegistry | None = None
 

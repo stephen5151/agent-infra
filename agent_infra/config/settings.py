@@ -144,6 +144,16 @@ class PrivacyConfig(BaseModel):
         return any(p.lower() in text_lower for p in self.local_only_patterns)
 
 
+class KnowledgeConfig(BaseModel):
+    enabled: bool = True
+    fetch_schedule: str = "07:00"
+    feed_size: int = 7
+    exploration_ratio: float = 0.2
+    hn_min_score: int = 100
+    arxiv_categories: list[str] = ["cs.AI", "cs.LG", "cs.SE", "cs.CR"]
+    write_to_obsidian: bool = True
+
+
 class Settings(BaseModel):
     """完整配置，从 soul.toml 加载。"""
     identity: Identity = Field(default_factory=Identity)
@@ -155,6 +165,7 @@ class Settings(BaseModel):
     healing: HealingConfig = Field(default_factory=HealingConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
 
     def ensure_dirs(self) -> None:
         """确保所有数据目录存在。"""
