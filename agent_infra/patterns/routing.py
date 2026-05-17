@@ -13,13 +13,14 @@ Key insight from the book:
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from agent_infra.core.llm import get_llm
+from agent_infra.core.llm import cached_system, get_llm
 from agent_infra.core.state import AgentState
 
 
@@ -40,6 +41,8 @@ class RouterNode:
                  "math": "arithmetic or algebraic calculation"}
         default_route: Fallback when confidence is below the threshold.
         confidence_threshold: Minimum confidence to accept a classification.
+        keyword_map: Optional dict mapping route label → list of keyword patterns.
+                     When provided, matching keywords short-circuit the LLM call.
     """
 
     def __init__(
@@ -47,15 +50,28 @@ class RouterNode:
         routes: dict[str, str],
         default_route: str = "general",
         confidence_threshold: float = 0.6,
-        model: str = "claude-sonnet-4-6",
+        model: str = "claude-haiku-4-5-20251001",
+        keyword_map: dict[str, list[str]] | None = None,
     ) -> None:
         self.routes = routes
         self.default_route = default_route
         self.threshold = confidence_threshold
         self.llm = get_llm(model=model).with_structured_output(RouteDecision)
+        # Compile keyword patterns once at init time
+        self._kw: list[tuple[str, re.Pattern[str]]] = [
+            (label, re.compile("|".join(re.escape(kw) for kw in kws), re.IGNORECASE))
+            for label, kws in (keyword_map or {}).items()
+        ]
 
     def __call__(self, state: AgentState) -> dict[str, Any]:
         user_input = _latest_human_message(state)
+
+        # Fast path: keyword matching — no LLM call needed
+        for label, pattern in self._kw:
+            if pattern.search(user_input):
+                return {"route": label}
+
+        # Slow path: LLM classification for ambiguous inputs
         route_descriptions = "\n".join(
             f'  • "{label}": {desc}' for label, desc in self.routes.items()
         )
@@ -67,7 +83,7 @@ class RouterNode:
             f"If none match well, use route='{self.default_route}'."
         )
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=system),
+            cached_system(system),
             HumanMessage(content=user_input),
         ])
         decision: RouteDecision = (prompt | self.llm).invoke({})

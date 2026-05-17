@@ -16,12 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from agent_infra.core.llm import get_llm
+from agent_infra.core.llm import cached_system, get_llm
 from agent_infra.core.state import AgentState
+
+_MAX_DEP_CHARS = 1500
 
 
 @dataclass
@@ -46,7 +48,6 @@ class ChainNode:
     def __call__(self, state: AgentState) -> dict[str, Any]:
         user_input = _extract_user_input(state)
         context: dict[str, str] = dict(state.get("chain_context") or {})
-        # ✅ 把上轮 Reflection 的 critique 注入 context，让每个步骤都能"知道上次错哪了"
         critique = state.get("reflection") or ""
 
         for step in self.steps:
@@ -65,20 +66,24 @@ class ChainNode:
         context: dict[str, str],
         critique: str = "",
     ) -> str:
-        prior = "\n\n".join(
-            f"[{dep}]\n{context[dep]}"
-            for dep in step.depends_on
-            if dep in context
-        )
+        parts = []
+        for dep in step.depends_on:
+            if dep not in context:
+                continue
+            text = context[dep]
+            if len(text) > _MAX_DEP_CHARS:
+                text = text[:_MAX_DEP_CHARS] + "…[截断]"
+            parts.append(f"[{dep}]\n{text}")
+        prior = "\n\n".join(parts)
+
         human_text = user_input
         if prior:
             human_text = f"{prior}\n\n---\nOriginal request: {user_input}"
-        # ✅ 注入 critique：告诉模型上次具体哪里不对，引导定向修复而非盲目重试
         if critique:
             human_text = f"[上轮审查反馈，本次必须修复]\n{critique}\n\n---\n{human_text}"
 
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=step.system_prompt),
+            cached_system(step.system_prompt),
             HumanMessage(content=human_text),
         ])
         chain = prompt | self.llm | self._parser

@@ -344,8 +344,7 @@ def run(
     extra_state: dict[str, Any] | None = None,
 ) -> str:
     """同步调用 agent，返回最终文本回复。"""
-    config = {"configurable": {"thread_id": thread_id}}
-    state = {**EMPTY_STATE, "messages": [HumanMessage(content=user_message)], **(extra_state or {})}
+    config, state = _build_runtime_input(user_message, thread_id, extra_state)
     result = agent.invoke(state, config=config)
     return _extract_last_ai(result)
 
@@ -365,8 +364,7 @@ def stream(
         for token in stream(agent, "写一个冒泡排序"):
             print(token, end="", flush=True)
     """
-    config = {"configurable": {"thread_id": thread_id}}
-    state = {**EMPTY_STATE, "messages": [HumanMessage(content=user_message)], **(extra_state or {})}
+    config, state = _build_runtime_input(user_message, thread_id, extra_state)
     for chunk, _ in agent.stream(state, config=config, stream_mode="messages"):
         if isinstance(chunk, AIMessage) and chunk.content:
             yield str(chunk.content)
@@ -385,8 +383,7 @@ async def astream(
         async for token in astream(agent, "写一个冒泡排序"):
             await websocket.send_text(token)
     """
-    config = {"configurable": {"thread_id": thread_id}}
-    state = {**EMPTY_STATE, "messages": [HumanMessage(content=user_message)], **(extra_state or {})}
+    config, state = _build_runtime_input(user_message, thread_id, extra_state)
     async for chunk, _ in agent.astream(state, config=config, stream_mode="messages"):
         if isinstance(chunk, AIMessage) and chunk.content:
             yield str(chunk.content)
@@ -429,3 +426,18 @@ def _extract_last_ai(result: dict[str, Any]) -> str:
         if isinstance(msg, AIMessage) and msg.content:
             return str(msg.content)
     return result.get("guard_reason") or ""
+
+
+def _build_runtime_input(
+    user_message: str,
+    thread_id: str,
+    extra_state: dict[str, Any] | None,
+) -> tuple[dict[str, dict[str, str]], dict[str, Any]]:
+    """为普通调用构建统一的 config 和初始 state。"""
+    config = {"configurable": {"thread_id": thread_id}}
+    state = {
+        **EMPTY_STATE,
+        "messages": [HumanMessage(content=user_message)],
+        **(extra_state or {}),
+    }
+    return config, state

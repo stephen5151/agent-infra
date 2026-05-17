@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from agent_infra.core.llm import get_llm
+from agent_infra.core.llm import cached_system, get_llm
 from agent_infra.core.state import AgentState
 
 
@@ -68,8 +68,8 @@ class ReflectionNode:
         self,
         criteria: str = _DEFAULT_CRITERIA,
         code_mode: bool = False,
-        max_iterations: int = 3,
-        pass_threshold: int = 7,
+        max_iterations: int = 2,
+        pass_threshold: int = 6,
         model: str = "claude-sonnet-4-6",
     ) -> None:
         self.criteria = _CODE_CRITERIA if code_mode else criteria
@@ -140,7 +140,7 @@ class ReflectionNode:
         )
         human = f"用户请求:\n{user_request}\n\nAI 回复:\n{latest_output}"
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=system),
+            cached_system(system),
             HumanMessage(content=human),
         ])
         return (prompt | self.llm).invoke({})
@@ -190,7 +190,7 @@ def should_reflect(state: AgentState) -> Literal["reflect", "end"]:
     if state.get("finished"):
         return "end"
     count = state.get("reflection_count") or 0
-    if count >= 3:
+    if count >= 2:
         return "end"
     return "reflect"
 
