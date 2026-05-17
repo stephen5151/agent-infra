@@ -422,7 +422,6 @@ OK"""
             i for i in report.issues_found
             if i.issue_type == "logic"
             and i.severity == "error"
-            and i.suggested_fix
         ]
         for issue in llm_fixable[:2]:  # 最多自动修 2 个
             fixed = await self._llm_apply_fix(issue)

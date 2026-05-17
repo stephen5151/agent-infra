@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import typer
 from rich.console import Console
@@ -161,31 +162,35 @@ def _schedule_digest() -> None:
 
 async def _run_digest() -> None:
     from agent_infra.intelligence.digest import get_digest_generator
-    from agent_infra.monitor.task_registry import get_registry
 
-    registry = get_registry()
-    t0 = registry.mark_running("daily_digest")
-    try:
+    async def _job() -> None:
         gen = get_digest_generator()
         await gen.generate_daily()
-        registry.mark_done("daily_digest", t0, success=True)
-    except Exception as e:
-        registry.mark_done("daily_digest", t0, success=False, error=str(e))
-        raise
+
+    await _run_registered_job("daily_digest", _job)
 
 
 async def _run_maintenance() -> None:
     from agent_infra.automation.self_maintainer import get_self_maintainer
+
+    async def _job() -> None:
+        maintainer = get_self_maintainer()
+        await maintainer.run()
+
+    await _run_registered_job("self_maintain", _job)
+
+
+async def _run_registered_job(task_id: str, job: Callable[[], Awaitable[None]]) -> None:
+    """统一处理定时任务的状态记录，避免重复的 mark_running/mark_done 模板代码。"""
     from agent_infra.monitor.task_registry import get_registry
 
     registry = get_registry()
-    t0 = registry.mark_running("self_maintain")
+    t0 = registry.mark_running(task_id)
     try:
-        maintainer = get_self_maintainer()
-        await maintainer.run()
-        registry.mark_done("self_maintain", t0, success=True)
+        await job()
+        registry.mark_done(task_id, t0, success=True)
     except Exception as e:
-        registry.mark_done("self_maintain", t0, success=False, error=str(e))
+        registry.mark_done(task_id, t0, success=False, error=str(e))
         raise
 
 
