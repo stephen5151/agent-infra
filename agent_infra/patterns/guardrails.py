@@ -25,7 +25,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from agent_infra.core.llm import get_llm
+from agent_infra.core.llm import cached_system, get_llm
 from agent_infra.core.state import AgentState
 
 
@@ -63,8 +63,8 @@ class InputGuardNode:
         self,
         allowed_topics: list[str] | None = None,
         blocked_patterns: list[str] | None = None,
-        use_llm_check: bool = True,
-        model: str = "claude-sonnet-4-6",
+        use_llm_check: bool = False,
+        model: str = "claude-haiku-4-5-20251001",
     ) -> None:
         self.allowed_topics = allowed_topics or []
         self.blocked_patterns = [re.compile(p) for p in (blocked_patterns or [])]
@@ -119,7 +119,7 @@ class InputGuardNode:
             "返回 JSON: passed (bool), reason (str), severity (low|medium|high)"
         )
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=system),
+            cached_system(system),
             HumanMessage(content=text),
         ])
         return (prompt | self.llm).invoke({})

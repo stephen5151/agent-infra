@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 
 
 @lru_cache(maxsize=8)
@@ -31,13 +32,21 @@ def get_llm(
         "max_tokens": max_tokens,
         "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY"),
     }
-    # Prompt caching: inject cache_control on model_kwargs so the API
-    # caches the system prompt block across calls with the same prefix.
-    if cache:
-        kwargs["model_kwargs"] = {
-            "extra_headers": {"anthropic-beta": "prompt-caching-2024-07-31"},
-        }
     return ChatAnthropic(**kwargs)
+
+
+def cached_system(text: str) -> SystemMessage:
+    """
+    Return a SystemMessage with cache_control ephemeral set on the text block.
+
+    Anthropic prompt caching requires the cache_control marker inside the
+    message content block — the beta header alone is not enough.
+    Wrapping every static system prompt with this helper ensures the prefix
+    is cached across calls and input tokens are billed at the cached rate.
+    """
+    return SystemMessage(content=[
+        {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}},
+    ])
 
 
 def get_structured_llm(schema: type[Any], **kwargs: Any) -> Any:

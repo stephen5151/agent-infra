@@ -21,7 +21,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from agent_infra.core.llm import get_llm, get_structured_llm
+from agent_infra.core.llm import cached_system, get_llm, get_structured_llm
 from agent_infra.core.state import AgentState, PlanStep, StepResult
 from agent_infra.core.tools import TOOLS
 
@@ -53,7 +53,7 @@ class PlannerNode:
             "Return JSON with keys: steps (list[str]), reasoning (str)."
         )
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=system),
+            cached_system(system),
             HumanMessage(content=user_input),
         ])
         plan: Plan = (prompt | self.llm).invoke({})
@@ -92,13 +92,12 @@ class ExecutorNode:
             system_parts.append(f"\n工作记忆:\n{working_mem}")
         if prior_results:
             system_parts.append(f"\n前序步骤结果:\n{prior_results}")
-        # ✅ 注入上轮 Reflection critique，让 executor 知道上次错在哪里并定向修复
         critique = state.get("reflection") or ""
         if critique:
             system_parts.append(f"\n[上轮审查反馈，本次必须修复]\n{critique}")
 
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content="\n".join(system_parts)),
+            cached_system("\n".join(system_parts)),
             HumanMessage(content=f"Subtask {idx + 1}: {current['task']}"),
         ])
         response = (prompt | self.llm).invoke({})
@@ -153,8 +152,18 @@ def _latest_human_message(state: AgentState) -> str:
     return ""
 
 
+_MAX_PRIOR_STEPS = 2
+_MAX_STEP_CHARS = 600
+
+
 def _format_prior_results(results: list[StepResult]) -> str:
     if not results:
         return ""
-    lines = [f"Step {r['step'] + 1}: {r['output']}" for r in results]
+    recent = results[-_MAX_PRIOR_STEPS:]
+    lines = []
+    for r in recent:
+        out = r["output"]
+        if len(out) > _MAX_STEP_CHARS:
+            out = out[:_MAX_STEP_CHARS] + "…[截断]"
+        lines.append(f"Step {r['step'] + 1}: {out}")
     return "\n".join(lines)
