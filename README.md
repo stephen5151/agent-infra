@@ -1,5 +1,7 @@
 # Agent Infra — Jarvis
 
+[中文版](README.zh.md)
+
 Personal AI Agent infrastructure built on LangGraph + Claude. Jarvis runs locally, captures context from your environment, maintains memory, and proactively surfaces insights.
 
 ## Architecture
