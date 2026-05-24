@@ -42,6 +42,25 @@ cp .env.example .env
 jarvis start
 ```
 
+## Optional Pi.dev CLI Input
+
+Jarvis also exposes a Pi-friendly CLI bridge. It keeps the existing `ask` and
+`chat` commands unchanged, while giving Pi.dev a simple command it can call.
+
+```bash
+# Pass a prompt as arguments
+jarvis pi "帮我总结今天的记忆"
+
+# Or pipe input from another CLI
+echo "根据最近的笔记给我三个行动建议" | jarvis pi
+
+# Machine-readable output for automation
+jarvis pi --json --thread pi "分析这段输入"
+
+# Use the lighter ask path instead of the full agent graph
+jarvis pi --mode ask "查一下我的知识库里有没有相关内容"
+```
+
 ## Requirements
 
 - Python 3.11+

@@ -13,6 +13,7 @@ typer + rich 命令行界面。
     python -m agent_infra digest        # 立即生成日报
     python -m agent_infra search   # 搜索记忆
     python -m agent_infra ask      # 直接提问
+    python -m agent_infra pi       # Pi.dev CLI 入口
     python -m agent_infra install  # 安装 Claude Code hooks
 """
 from __future__ import annotations
@@ -518,6 +519,74 @@ def chat(
             console.print()  # 换行
         except Exception as e:
             console.print(f"\n[red]错误: {e}[/red]")
+
+
+# ── Pi.dev CLI 入口 ───────────────────────────────────────────────────────────
+
+@app.command()
+def pi(
+    prompt_parts: list[str] = typer.Argument(
+        None,
+        metavar="[PROMPT]...",
+        help="输入内容；也可以通过 stdin 管道传入",
+    ),
+    thread: str = typer.Option("pi", "--thread", "-t", help="对话线程 ID"),
+    mode: str = typer.Option("agent", "--mode", "-M", help="agent=完整 Agent 图，ask=轻量问答"),
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合 Pi 自动读取"),
+    local: bool = typer.Option(False, "--local", "-l", help="ask 模式下强制使用本地 Ollama"),
+    code_mode: bool = typer.Option(False, "--code", "-c", help="agent 模式下启用代码检查"),
+    model: str = typer.Option("claude-sonnet-4-6", "--model", "-m", help="agent 模式使用的模型"),
+    hitl: bool = typer.Option(False, "--hitl", help="agent 模式下开启 Human-in-the-Loop 审核"),
+) -> None:
+    """Pi.dev 可调用的 Jarvis 输入入口。"""
+    from agent_infra.pi_bridge import (
+        PiInputError,
+        build_json_payload,
+        resolve_prompt,
+        run_agent_prompt,
+        run_ask_prompt,
+    )
+
+    stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
+    try:
+        prompt = resolve_prompt(prompt_parts or (), stdin_text)
+    except PiInputError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"agent", "ask"}:
+        console.print("[red]mode 必须是 agent 或 ask[/red]")
+        raise typer.Exit(1)
+
+    try:
+        if normalized_mode == "ask":
+            response = asyncio.run(run_ask_prompt(prompt, local=local))
+        else:
+            response = run_agent_prompt(
+                prompt,
+                thread=thread,
+                model=model,
+                code_mode=code_mode,
+                hitl=hitl,
+            )
+    except Exception as e:
+        console.print(f"[red]Pi 入口执行失败: {e}[/red]")
+        raise typer.Exit(1)
+
+    output = (
+        build_json_payload(
+            prompt=prompt,
+            response=response,
+            thread=thread,
+            mode=normalized_mode,
+        )
+        if json_output
+        else response
+    )
+    sys.stdout.write(output)
+    if not output.endswith("\n"):
+        sys.stdout.write("\n")
 
 
 # ── 监控仪表盘 ────────────────────────────────────────────────────────────────
