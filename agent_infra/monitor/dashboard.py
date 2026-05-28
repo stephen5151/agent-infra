@@ -144,9 +144,42 @@ def _build_routine_table(tasks: dict) -> Table:
     return table
 
 
-def _build_activity_panel(limit: int = 6) -> Panel:
-    """从情节记忆拉最新事件。"""
+def _build_knowledge_bar() -> Text:
+    """知识库一行摘要：未读数 + 已收藏数。"""
+    try:
+        from agent_infra.knowledge.store import get_knowledge_store
+        store = get_knowledge_store()
+        stats = store.stats()
+        total = stats.get("total_items", 0)
+        shown = stats.get("shown", 0)
+        unread = total - shown
+        bookmarks = stats.get("feedback", {}).get("bookmark", 0)
+        likes = stats.get("feedback", {}).get("like", 0)
+        pending = stats.get("pending_summary", 0)
+
+        line = Text(no_wrap=True)
+        if unread > 0:
+            line.append(f"📚 {unread} 条待读", style="cyan")
+        else:
+            line.append("📚 无待读内容", style="dim")
+        if bookmarks:
+            line.append(f"  ⭐ {bookmarks} 已收藏", style="yellow")
+        if likes:
+            line.append(f"  👍 {likes} 喜欢", style="green")
+        if pending:
+            line.append(f"  ⏳ {pending} 待摘要", style="dim")
+        return line
+    except Exception:
+        return Text("知识库未初始化", style="dim")
+
+
+def _build_activity_panel(limit: int = 5) -> Panel:
+    """从情节记忆拉最新事件 + 知识库摘要行。"""
     rows: list[str] = []
+
+    # 知识库状态行
+    kb_line = _build_knowledge_bar()
+
     try:
         from agent_infra.memory.episodic import get_episodic_memory
         mem = get_episodic_memory()
@@ -159,7 +192,17 @@ def _build_activity_panel(limit: int = 6) -> Panel:
     except Exception as ex:
         rows.append(f"[dim]无法读取事件流: {ex}[/dim]")
 
-    body = "\n".join(rows) if rows else "[dim]暂无活动[/dim]"
+    from rich.console import Group
+    from rich.text import Text as RText
+
+    if rows:
+        activity_text = RText("\n".join(rows))
+    else:
+        activity_text = RText("暂无活动", style="dim")
+    body = Group(
+        Panel(kb_line, title="[bold]知识推送[/bold]", border_style="cyan", padding=(0, 1)),
+        activity_text,
+    )
     return Panel(body, title="[bold]最近活动[/bold]", border_style="dim", padding=(0, 1))
 
 

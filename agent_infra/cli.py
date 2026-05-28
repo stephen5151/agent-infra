@@ -6,10 +6,14 @@ typer + rich 命令行界面。
 用法:
     python -m agent_infra          # 启动守护进程
     python -m agent_infra status   # 查看系统状态
-    python -m agent_infra monitor  # 实时监控仪表盘
-    python -m agent_infra digest   # 立即生成日报
+    python -m agent_infra monitor       # 实时监控仪表盘
+    python -m agent_infra feed          # 今日知识推送 + 评分
+    python -m agent_infra fetch-knowledge  # 立即抓取新内容
+    python -m agent_infra preferences   # 话题偏好权重
+    python -m agent_infra digest        # 立即生成日报
     python -m agent_infra search   # 搜索记忆
     python -m agent_infra ask      # 直接提问
+    python -m agent_infra pi       # Pi.dev CLI 入口
     python -m agent_infra install  # 安装 Claude Code hooks
 """
 from __future__ import annotations
@@ -61,6 +65,7 @@ async def _run_daemon(no_augment: bool = False) -> None:
     from agent_infra.capture.event_bus import get_event_bus
     from agent_infra.capture.adapters.clipboard import ClipboardAdapter
     from agent_infra.capture.adapters.claude_code import ClaudeCodeAdapter
+    from agent_infra.capture.adapters.files import FileAdapter
     from agent_infra.memory.episodic import get_episodic_memory
     from agent_infra.monitor.task_registry import get_registry
 
@@ -88,14 +93,30 @@ async def _run_daemon(no_augment: bool = False) -> None:
     from agent_infra.healing.monitor import get_health_monitor
     monitor = get_health_monitor()
 
-    # 定时任务（日报 + 自维护）
+    # 定时任务（日报 + 自维护 + 知识抓取）
     _schedule_jobs()
+
+    # 补跑关机期间漏掉的任务（后台异步，不阻塞启动）
+    asyncio.create_task(_catchup_missed_tasks(), name="catchup")
 
     # 启动适配器
     adapters = [
         ClipboardAdapter(bus=bus),
         ClaudeCodeAdapter(bus=bus),
+        FileAdapter(bus=bus),
     ]
+
+    # 将每个适配器注册进健康监控（自动重启 = stop → start）
+    for adapter in adapters:
+        if adapter.enabled:
+            async def _restart(a=adapter) -> None:
+                await a.stop()
+                await a.start()
+            monitor.register(
+                name=adapter.name,
+                check_fn=adapter.is_alive,
+                restart_fn=_restart,
+            )
 
     console.print("[green]✓[/green] 适配器已加载:")
     for adapter in adapters:
@@ -147,6 +168,13 @@ def _schedule_jobs() -> None:
             scheduler.add_job(_run_maintenance, "cron", hour=h, minute=m, id="self_maintain")
             added.append(f"自维护 {cfg.maintenance.schedule}")
 
+        # 知识抓取
+        if cfg.knowledge.enabled:
+            h, m = map(int, cfg.knowledge.fetch_schedule.split(":"))
+            registry.register_task("knowledge_fetch", "知识抓取", cfg.knowledge.fetch_schedule)
+            scheduler.add_job(_run_knowledge_fetch, "cron", hour=h, minute=m, id="knowledge_fetch")
+            added.append(f"知识抓取 {cfg.knowledge.fetch_schedule}")
+
         scheduler.start()
         for label in added:
             console.print(f"[green]✓[/green] 调度任务: {label}")
@@ -189,11 +217,72 @@ async def _run_maintenance() -> None:
         raise
 
 
+async def _run_knowledge_fetch() -> None:
+    from agent_infra.knowledge.feed import run_fetch_only
+    from agent_infra.monitor.task_registry import get_registry
+    from agent_infra.config.settings import get_settings
+
+    cfg = get_settings()
+    registry = get_registry()
+    t0 = registry.mark_running("knowledge_fetch")
+    try:
+        new_count = await run_fetch_only(
+            hn_min_score=cfg.knowledge.hn_min_score,
+            arxiv_categories=cfg.knowledge.arxiv_categories,
+        )
+        registry.mark_done("knowledge_fetch", t0, success=True)
+        return new_count
+    except Exception as e:
+        registry.mark_done("knowledge_fetch", t0, success=False, error=str(e))
+        raise
+
+
+async def _catchup_missed_tasks() -> None:
+    """启动时检测并补跑关机期间漏掉的 Routine 任务。"""
+    from agent_infra.monitor.task_registry import get_registry
+    import asyncio as _aio
+
+    registry = get_registry()
+    missed = registry.get_missed_tasks()
+    if not missed:
+        return
+
+    console.print(
+        f"\n[yellow]⚡ 检测到 {len(missed)} 个任务在关机期间未执行，正在后台补跑...[/yellow]"
+    )
+
+    _runners = {
+        "knowledge_fetch": _run_knowledge_fetch,
+        "daily_digest":    _run_digest,
+        "self_maintain":   _run_maintenance,
+    }
+    # 按优先级顺序：先知识抓取，再日报，最后维护
+    ordered = [tid for tid in _runners if tid in missed]
+
+    for task_id in ordered:
+        label = {"knowledge_fetch": "知识抓取", "daily_digest": "日报生成", "self_maintain": "自我维护"}.get(task_id, task_id)
+        console.print(f"  [dim]补跑: {label}[/dim]")
+        try:
+            await _runners[task_id]()
+            console.print(f"  [green]✓[/green] {label} 补跑完成")
+        except Exception as e:
+            console.print(f"  [red]✗[/red] {label} 补跑失败: {e}")
+
+
 # ── 状态查看 ──────────────────────────────────────────────────────────────────
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(False, "--json", help="输出统一状态 JSON"),
+) -> None:
     """查看 Jarvis 系统状态。"""
+    if json_output:
+        from agent_infra.harness.status import build_status_payload
+        import json
+
+        console.print(json.dumps(build_status_payload(Path.cwd()), ensure_ascii=False, indent=2))
+        return
+
     console.print(Panel.fit("[bold]Jarvis 系统状态[/bold]", border_style="blue"))
 
     # 配置
@@ -443,6 +532,74 @@ def chat(
             console.print(f"\n[red]错误: {e}[/red]")
 
 
+# ── Pi.dev CLI 入口 ───────────────────────────────────────────────────────────
+
+@app.command()
+def pi(
+    prompt_parts: list[str] = typer.Argument(
+        None,
+        metavar="[PROMPT]...",
+        help="输入内容；也可以通过 stdin 管道传入",
+    ),
+    thread: str = typer.Option("pi", "--thread", "-t", help="对话线程 ID"),
+    mode: str = typer.Option("agent", "--mode", "-M", help="agent=完整 Agent 图，ask=轻量问答"),
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合 Pi 自动读取"),
+    local: bool = typer.Option(False, "--local", "-l", help="ask 模式下强制使用本地 Ollama"),
+    code_mode: bool = typer.Option(False, "--code", "-c", help="agent 模式下启用代码检查"),
+    model: str = typer.Option("claude-sonnet-4-6", "--model", "-m", help="agent 模式使用的模型"),
+    hitl: bool = typer.Option(False, "--hitl", help="agent 模式下开启 Human-in-the-Loop 审核"),
+) -> None:
+    """Pi.dev 可调用的 Jarvis 输入入口。"""
+    from agent_infra.pi_bridge import (
+        PiInputError,
+        build_json_payload,
+        resolve_prompt,
+        run_agent_prompt,
+        run_ask_prompt,
+    )
+
+    stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
+    try:
+        prompt = resolve_prompt(prompt_parts or (), stdin_text)
+    except PiInputError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"agent", "ask"}:
+        console.print("[red]mode 必须是 agent 或 ask[/red]")
+        raise typer.Exit(1)
+
+    try:
+        if normalized_mode == "ask":
+            response = asyncio.run(run_ask_prompt(prompt, local=local))
+        else:
+            response = run_agent_prompt(
+                prompt,
+                thread=thread,
+                model=model,
+                code_mode=code_mode,
+                hitl=hitl,
+            )
+    except Exception as e:
+        console.print(f"[red]Pi 入口执行失败: {e}[/red]")
+        raise typer.Exit(1)
+
+    output = (
+        build_json_payload(
+            prompt=prompt,
+            response=response,
+            thread=thread,
+            mode=normalized_mode,
+        )
+        if json_output
+        else response
+    )
+    sys.stdout.write(output)
+    if not output.endswith("\n"):
+        sys.stdout.write("\n")
+
+
 # ── 监控仪表盘 ────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -453,6 +610,78 @@ def monitor(
     """实时监控仪表盘：查看每日 Routine 任务状态与当前执行情况。"""
     from agent_infra.monitor.dashboard import run_dashboard
     run_dashboard(refresh_interval=interval, once=once)
+
+
+# ── 知识推送 ─────────────────────────────────────────────────────────────────
+
+@app.command()
+def feed(
+    show_only: bool = typer.Option(False, "--show", "-s", help="只展示，不进入评分"),
+    fetch: bool = typer.Option(False, "--fetch", "-f", help="立即抓取新内容再展示"),
+    size: int = typer.Option(0, "--size", "-n", help="推送条数（0=使用配置默认值）"),
+) -> None:
+    """今日知识推送：阅读 + 逐条评分，偏好自动学习。"""
+    from agent_infra.config.settings import get_settings
+    cfg = get_settings()
+    feed_size = size if size > 0 else cfg.knowledge.feed_size
+
+    async def _run():
+        from agent_infra.knowledge.feed import run_feed
+        await run_feed(
+            feed_size=feed_size,
+            show_only=show_only,
+            force_fetch=fetch,
+            exploration_ratio=cfg.knowledge.exploration_ratio,
+            arxiv_categories=cfg.knowledge.arxiv_categories,
+        )
+
+    asyncio.run(_run())
+
+
+@app.command()
+def fetch_knowledge(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """立即抓取最新知识内容（HN + ArXiv）并生成摘要。"""
+    from agent_infra.config.settings import get_settings
+    cfg = get_settings()
+
+    async def _run():
+        from agent_infra.knowledge.feed import run_fetch_only
+        with console.status("[bold green]抓取中...[/bold green]"):
+            new_count = await run_fetch_only(
+                hn_min_score=cfg.knowledge.hn_min_score,
+                arxiv_categories=cfg.knowledge.arxiv_categories,
+            )
+        console.print(f"[green]✓[/green] 新增 {new_count} 条内容（含摘要生成）")
+        if verbose:
+            from agent_infra.knowledge.store import get_knowledge_store
+            stats = get_knowledge_store().stats()
+            _print_section("知识库状态", {
+                "总条目": stats["total_items"],
+                "已推送": stats["shown"],
+                "待摘要": stats["pending_summary"],
+                "反馈分布": str(stats["feedback"]),
+            })
+
+    asyncio.run(_run())
+
+
+@app.command()
+def preferences() -> None:
+    """查看并管理话题偏好权重（反馈历史 + 当前权重分布）。"""
+    from agent_infra.knowledge.store import get_knowledge_store
+    from agent_infra.knowledge.feed import _show_preferences
+    store = get_knowledge_store()
+    stats = store.stats()
+    _print_section("知识库统计", {
+        "总条目数": stats["total_items"],
+        "已推送": stats["shown"],
+        "待摘要": stats["pending_summary"],
+        "反馈分布": "  ".join(f"{k}:{v}" for k, v in stats["feedback"].items()) or "暂无",
+    })
+    console.print()
+    _show_preferences(store)
 
 
 # ── 安装 Claude Code hooks ─────────────────────────────────────────────────────
@@ -508,6 +737,78 @@ def maintain(
                     console.print(f"  ✅ {fix}")
 
     asyncio.run(_run())
+
+
+# ── 验证闭环 ────────────────────────────────────────────────────────────────
+
+@app.command()
+def verify(
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合自动化读取"),
+    root: str = typer.Option(".", "--root", help="要验证的项目根目录"),
+) -> None:
+    """运行构建、lint、测试等验证闭环。"""
+    from agent_infra.harness.verification import report_to_json, run_verification, summarize_report
+
+    project_type, report = run_verification(Path(root).resolve())
+    output = report_to_json(project_type, report) if json_output else summarize_report(report)
+    console.print(output)
+    if not all(item.passed for item in report):
+        raise typer.Exit(1)
+
+
+@app.command()
+def audit(
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合自动化读取"),
+    root: str = typer.Option(".", "--root", help="要审计的项目根目录"),
+) -> None:
+    """审计当前 agent harness 能力覆盖。"""
+    from agent_infra.harness.audit import run_harness_audit
+    import json
+
+    result = run_harness_audit(Path(root).resolve())
+    if json_output:
+        console.print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    console.print(f"Harness Audit: {result['overall_score']}/{result['max_score']}")
+    for item in result["categories"]:
+        status = "PASS" if item["passed"] else "FAIL"
+        console.print(f"- {item['category']}: {status} ({item['path']})")
+    if result["top_actions"]:
+        console.print("\nTop Actions:")
+        for action in result["top_actions"]:
+            console.print(f"- [{action['category']}] {action['action']} ({action['path']})")
+
+
+@app.command()
+def learn(
+    limit: int = typer.Option(50, "--limit", help="扫描最近多少条事件"),
+    min_repetitions: int = typer.Option(2, "--min-repetitions", help="重复多少次才提炼为技能"),
+) -> None:
+    """从近期事件中提炼可复用工作流。"""
+    from agent_infra.intelligence.learning import learn_recent_workflows
+
+    skills = learn_recent_workflows(limit=limit, min_repetitions=min_repetitions)
+    if not skills:
+        console.print("未发现足够稳定的重复工作流。")
+        return
+    console.print(f"新增 {len(skills)} 个技能:")
+    for skill in skills:
+        console.print(f"- {skill.name}: {skill.description}")
+
+
+@app.command()
+def adapters() -> None:
+    """列出当前已注册的 harness 适配层。"""
+    from agent_infra.harness.adapters import get_adapter_registry
+
+    for adapter in get_adapter_registry().list_adapters():
+        console.print(
+            f"- {adapter.name}: input={','.join(adapter.input_modes)} "
+            f"output={','.join(adapter.output_modes)} "
+            f"hooks={'yes' if adapter.supports_hooks else 'no'} "
+            f"sessions={'yes' if adapter.supports_sessions else 'no'}"
+        )
 
 
 # ── LLM 状态查看 ──────────────────────────────────────────────────────────────
@@ -582,6 +883,55 @@ def index(
         console.print("安装: pip install chromadb sentence-transformers")
     except Exception as e:
         console.print(f"[red]索引失败: {e}[/red]")
+
+
+# ── 回滚快照 ─────────────────────────────────────────────────────────────────
+
+@app.command()
+def rollback(
+    snapshot_id: str = typer.Argument(
+        default="",
+        help="快照 ID（如 20260516_103045）。留空则列出所有可用快照。",
+    ),
+) -> None:
+    """回滚自维护修改到指定快照版本。"""
+    from agent_infra.automation import list_snapshots, rollback_snapshot
+
+    snapshots = list_snapshots()
+
+    if not snapshot_id:
+        # 列出所有快照
+        if not snapshots:
+            console.print("[yellow]暂无可用快照。自维护运行后会自动创建。[/yellow]")
+            return
+        table = Table(show_header=True, header_style="bold cyan", title="可用快照")
+        table.add_column("快照 ID", style="bold")
+        table.add_column("创建时间")
+        table.add_column("修改文件数")
+        table.add_column("已应用修复")
+        for s in snapshots:
+            files = s.get("files", [])
+            fixes = [f for f in s.get("fixes_applied", []) if not f.startswith("[快照")]
+            table.add_row(
+                s["snapshot_id"],
+                s.get("created_at", "")[:19].replace("T", " "),
+                str(len(files)),
+                "\n".join(fixes[:3]) or "—",
+            )
+        console.print(table)
+        console.print("\n[dim]用法: jarvis rollback <快照ID>[/dim]")
+        return
+
+    # 执行回滚
+    console.print(f"[yellow]正在回滚到快照 {snapshot_id}...[/yellow]")
+    restored, errors = rollback_snapshot(snapshot_id)
+    if errors:
+        for err in errors:
+            console.print(f"[red]✗ {err}[/red]")
+    if restored:
+        console.print(f"[green]✓ 已恢复 {restored} 个文件[/green]")
+    else:
+        console.print("[red]回滚失败，未恢复任何文件[/red]")
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────

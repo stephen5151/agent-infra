@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -34,6 +35,121 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+BACKUP_ROOT = Path("~/.jarvis/backups").expanduser()
+
+
+# ── 快照 / 回滚管理器 ─────────────────────────────────────────────────────────
+
+class BackupManager:
+    """
+    每次维护运行前创建带时间戳的快照目录。
+
+    目录结构:
+        ~/.jarvis/backups/
+            20260516_103045/
+                manifest.json          # 本次快照元数据
+                agent_infra/core/llm.py   # 原始文件（保留相对路径）
+                ...
+    """
+
+    def __init__(self) -> None:
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.snapshot_dir = BACKUP_ROOT / ts
+        self._manifest: dict = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot_id": ts,
+            "files": [],   # [{rel_path, reason}]
+        }
+        self._committed = False
+
+    def backup_file(self, file_path: Path, reason: str = "") -> None:
+        """在修改前备份单个文件到快照目录（首次调用时创建快照目录）。"""
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            rel = file_path.relative_to(PROJECT_ROOT)
+        except ValueError:
+            rel = Path(file_path.name)
+        dest = self.snapshot_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, dest)
+        self._manifest["files"].append({"rel_path": str(rel), "reason": reason})
+        self._save_manifest()
+        logger.debug(f"Backed up {rel} → {self.snapshot_dir.name}")
+
+    def _save_manifest(self) -> None:
+        (self.snapshot_dir / "manifest.json").write_text(
+            json.dumps(self._manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def commit(self, fixes_applied: list[str]) -> None:
+        """维护结束后写入最终摘要。"""
+        self._manifest["fixes_applied"] = fixes_applied
+        self._manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+        if self.snapshot_dir.exists():
+            self._save_manifest()
+        self._committed = True
+
+    def discard(self) -> None:
+        """若没有任何文件被修改，删除空快照目录。"""
+        if self.snapshot_dir.exists() and not any(self.snapshot_dir.iterdir()):
+            self.snapshot_dir.rmdir()
+
+    @property
+    def snapshot_id(self) -> str:
+        return self._manifest["snapshot_id"]
+
+
+# ── 快照列表 / 回滚工具函数（供 CLI 调用）──────────────────────────────────────
+
+def list_snapshots() -> list[dict]:
+    """返回所有可用快照，按时间倒序。"""
+    if not BACKUP_ROOT.exists():
+        return []
+    result = []
+    for d in sorted(BACKUP_ROOT.iterdir(), reverse=True):
+        manifest_path = d / "manifest.json"
+        if d.is_dir() and manifest_path.exists():
+            try:
+                data = json.loads(manifest_path.read_text())
+                data["snapshot_dir"] = str(d)
+                result.append(data)
+            except Exception:
+                pass
+    return result
+
+
+def rollback_snapshot(snapshot_id: str) -> tuple[int, list[str]]:
+    """
+    回滚到指定快照。返回 (恢复文件数, 错误列表)。
+    """
+    snapshot_dir = BACKUP_ROOT / snapshot_id
+    if not snapshot_dir.exists():
+        return 0, [f"快照 {snapshot_id} 不存在"]
+
+    manifest_path = snapshot_dir / "manifest.json"
+    if not manifest_path.exists():
+        return 0, ["manifest.json 缺失，无法回滚"]
+
+    manifest = json.loads(manifest_path.read_text())
+    restored = 0
+    errors = []
+    for entry in manifest.get("files", []):
+        rel = entry["rel_path"]
+        src = snapshot_dir / rel
+        dst = PROJECT_ROOT / rel
+        if not src.exists():
+            errors.append(f"备份文件不存在: {rel}")
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            restored += 1
+            logger.info(f"Restored {rel}")
+        except Exception as e:
+            errors.append(f"恢复 {rel} 失败: {e}")
+    return restored, errors
 
 
 @dataclass
@@ -136,15 +252,14 @@ class SelfMaintainer:
     async def run(self) -> MaintenanceReport:
         """运行完整维护流程。"""
         report = MaintenanceReport()
-        logger.info(f"Self-maintenance started on: {self.target_dir}")
+        backup = BackupManager()
+        logger.info(f"Self-maintenance started on: {self.target_dir} (snapshot: {backup.snapshot_id})")
 
         py_files = list(self.target_dir.rglob("*.py"))
         report.files_checked = len(py_files)
 
         # Step 1: 语法检查
-        syntax_issues = await asyncio.to_thread(
-            self._check_syntax, py_files
-        )
+        syntax_issues = await asyncio.to_thread(self._check_syntax, py_files)
         report.issues_found.extend(syntax_issues)
 
         # Step 2: 静态分析（lint）
@@ -164,11 +279,17 @@ class SelfMaintainer:
             llm_issues = await self._llm_code_review(py_files)
             report.issues_found.extend(llm_issues)
 
-        # Step 6: 自动修复
+        # Step 6: 自动修复（传入 backup 管理器）
         if self.auto_fix and report.issues_found:
-            await self._auto_fix(report)
+            await self._auto_fix(report, backup)
 
         report.finished_at = datetime.now(timezone.utc)
+        backup.commit(report.fixes_applied)
+
+        if not report.fixes_applied:
+            backup.discard()  # 无修改则清理空快照目录
+        else:
+            report.fixes_applied.append(f"[快照 ID: {backup.snapshot_id}]")
 
         # Step 7: 写入 Obsidian
         await asyncio.to_thread(self._write_report, report)
@@ -397,14 +518,14 @@ OK"""
                     severity=severity.lower(),
                     message=message.strip(),
                     line_number=int(lineno),
-                    auto_fixable=False,
+                    auto_fixable=(severity.lower() == "error"),
                 ))
 
         return issues[:5]  # 每文件最多 5 个
 
     # ── Step 6: 自动修复 ──────────────────────────────────────────────────────
 
-    async def _auto_fix(self, report: MaintenanceReport) -> None:
+    async def _auto_fix(self, report: MaintenanceReport, backup: BackupManager) -> None:
         """尝试自动修复可修复的问题。"""
         # 优先用 ruff --fix 处理 lint 问题
         fixable_lint = [
@@ -412,20 +533,25 @@ OK"""
             if i.issue_type == "lint" and i.auto_fixable
         ]
         if fixable_lint:
+            # 备份所有涉及 lint 的文件
+            seen: set[Path] = set()
+            for issue in fixable_lint:
+                if issue.file_path not in seen:
+                    backup.backup_file(issue.file_path, reason="ruff lint auto-fix")
+                    seen.add(issue.file_path)
             fixed = await self._ruff_auto_fix()
             if fixed:
                 report.issues_fixed += fixed
                 report.fixes_applied.append(f"ruff --fix 修复了 {fixed} 个 lint 问题")
 
-        # LLM 修复 logic 类问题（重要、有建议的）
+        # LLM 修复 logic 类问题（error 级别自动修）
         llm_fixable = [
             i for i in report.issues_found
             if i.issue_type == "logic"
             and i.severity == "error"
-            and i.suggested_fix
         ]
         for issue in llm_fixable[:2]:  # 最多自动修 2 个
-            fixed = await self._llm_apply_fix(issue)
+            fixed = await self._llm_apply_fix(issue, backup)
             if fixed:
                 report.issues_fixed += 1
                 report.fixes_applied.append(
@@ -443,14 +569,13 @@ OK"""
                 text=True,
                 timeout=30,
             )
-            # 解析修复数量
             match = re.search(r'Fixed (\d+)', result.stdout + result.stderr)
             return int(match.group(1)) if match else 0
         except Exception:
             return 0
 
-    async def _llm_apply_fix(self, issue: IssueFound) -> bool:
-        """让 LLM 生成并应用修复代码。"""
+    async def _llm_apply_fix(self, issue: IssueFound, backup: BackupManager) -> bool:
+        """让 LLM 生成并直接应用修复代码（含语法校验 + 快照备份）。"""
         try:
             source = issue.file_path.read_text(encoding="utf-8")
             lines = source.splitlines()
@@ -464,10 +589,10 @@ OK"""
             prompt = f"""文件 {issue.file_path.name} 第 {issue.line_number} 行有以下问题：
 {issue.message}
 
-相关代码：
+相关代码（第 {ctx_start+1}–{ctx_end} 行）：
 {context}
 
-请提供修复后的代码片段（只返回修复的那几行，不要解释）："""
+请返回修复后的完整代码块（与上面行数相同的替换内容，不含行号前缀，不加任何解释）："""
 
             fix_code = await asyncio.wait_for(
                 llm.agenerate(human=prompt, force_subscription=True),
@@ -477,10 +602,37 @@ OK"""
             if not fix_code or len(fix_code) > 2000:
                 return False
 
-            # 生成 diff 并记录（暂不自动应用，风险太高）
+            # 去掉 LLM 可能带的 markdown 代码块标记
+            fix_code = re.sub(r"^```[^\n]*\n?", "", fix_code.strip())
+            fix_code = re.sub(r"\n?```$", "", fix_code)
+
             issue.suggested_fix = fix_code
-            logger.info(f"LLM fix suggested for {issue.file_path.name}:{issue.line_number}")
-            return False  # 暂时只记录不自动应用，需要人工确认
+            fix_lines = fix_code.splitlines()
+
+            # 组合新文件内容
+            new_lines = lines[:ctx_start] + fix_lines + lines[ctx_end:]
+            new_source = "\n".join(new_lines) + "\n"
+
+            # 语法校验：只有通过才写入
+            try:
+                ast.parse(new_source)
+            except SyntaxError as se:
+                logger.warning(f"LLM fix rejected (syntax error): {se}")
+                return False
+
+            # 写入快照（在修改文件之前）
+            backup.backup_file(
+                issue.file_path,
+                reason=f"LLM fix: {issue.message[:80]}",
+            )
+
+            # 写入修复后内容
+            issue.file_path.write_text(new_source, encoding="utf-8")
+            logger.info(
+                f"Auto-fixed {issue.file_path.name}:{issue.line_number} "
+                f"(snapshot: {backup.snapshot_id})"
+            )
+            return True
 
         except Exception as e:
             logger.debug(f"LLM fix failed: {e}")

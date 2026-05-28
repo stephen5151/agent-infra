@@ -59,6 +59,13 @@ from agent_infra.core.tools import get_tool_node
 from agent_infra.memory.store import MemoryNode, MemoryStore
 from agent_infra.patterns.chaining import ChainNode, ChainStep
 from agent_infra.patterns.project_builder import FileApplyNode, ProjectBuilderNode
+from agent_infra.patterns.perspective_engine import (
+    PerspectiveDispatchNode,
+    PerspectivePlannerNode,
+    PerspectiveSynthesisNode,
+    PerspectiveWorkerNode,
+    perspective_dispatch_edge,
+)
 from agent_infra.patterns.code_check import CodeCheckNode
 from agent_infra.patterns.guardrails import InputGuardNode, OutputGuardNode, guard_edge
 from agent_infra.patterns.hitl import HITLNode, TriggerMode, hitl_edge
@@ -80,6 +87,7 @@ DEFAULT_ROUTES = {
     "plan":     "复杂多步骤任务，需要规划、研究或工具调用",
     "parallel": "可拆分为多个独立子任务的批量处理请求",
     "project":  "创建新项目、生成完整应用代码、脚手架构建、从零搭建系统",
+    "debate":   "多视角分析、辩证思考、需要从不同角度理解的议题、争议性话题、利弊权衡",
 }
 
 # ── 默认 Chain 步骤 ────────────────────────────────────────────────────────────
@@ -228,6 +236,10 @@ def build_agent(
     aggregate_node = AggregateNode(model=model)
     project_builder = ProjectBuilderNode(model=model)
     file_apply = FileApplyNode()
+    perspective_planner   = PerspectivePlannerNode(model=model)
+    perspective_dispatch  = PerspectiveDispatchNode()
+    perspective_worker    = PerspectiveWorkerNode(model=model)
+    perspective_synthesis = PerspectiveSynthesisNode(model=model)
     cp = checkpointer or MemorySaver()
 
     # ── 构建图 ────────────────────────────────────────────────────────────────
@@ -245,9 +257,13 @@ def build_agent(
     g.add_node("dispatch",           dispatch_node)        # parallel 扇出入口
     g.add_node("parallel_worker",    parallel_worker)
     g.add_node("aggregate",          aggregate_node)
-    g.add_node("project_builder",    project_builder)      # 项目创建矩阵 agent
-    g.add_node("file_apply",         file_apply)           # HITL 批准后落盘
-    g.add_node("code_check",         code_check)           # 生成后质量门
+    g.add_node("project_builder",       project_builder)       # 项目创建矩阵 agent
+    g.add_node("file_apply",            file_apply)            # HITL 批准后落盘
+    g.add_node("perspective_planner",   perspective_planner)   # 多视角：规划视角
+    g.add_node("perspective_dispatch",  perspective_dispatch)   # 多视角：扇出
+    g.add_node("perspective_worker",    perspective_worker)     # 多视角：单视角 worker
+    g.add_node("perspective_synthesis", perspective_synthesis)  # 多视角：整合
+    g.add_node("code_check",            code_check)             # 生成后质量门
     g.add_node("reflect",            reflector)
     g.add_node("hitl",               hitl_node)
     g.add_node("output_guard",       output_guard)
@@ -273,6 +289,7 @@ def build_agent(
             "plan":     "planner",
             "parallel": "dispatch",
             "project":  "project_builder",
+            "debate":   "perspective_planner",
             "general":  "chain",
         },
     )
@@ -298,6 +315,15 @@ def build_agent(
 
     # project 路径: project_builder → code_check（lint 生成文件）→ reflect → hitl → file_apply
     g.add_edge("project_builder", "code_check")
+
+    # debate 路径: perspective_planner → dispatch →(Send×N)→ worker → synthesis → reflect → hitl
+    g.add_edge("perspective_planner", "perspective_dispatch")
+    g.add_conditional_edges(
+        "perspective_dispatch", perspective_dispatch_edge,
+        {"perspective_worker": "perspective_worker", "perspective_synthesis": "perspective_synthesis"},
+    )
+    g.add_edge("perspective_worker",    "perspective_synthesis")
+    g.add_edge("perspective_synthesis", "reflect")
 
     # code_check → reflect（所有生成路径的汇合点）
     g.add_edge("code_check", "reflect")
