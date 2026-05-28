@@ -65,6 +65,7 @@ async def _run_daemon(no_augment: bool = False) -> None:
     from agent_infra.capture.event_bus import get_event_bus
     from agent_infra.capture.adapters.clipboard import ClipboardAdapter
     from agent_infra.capture.adapters.claude_code import ClaudeCodeAdapter
+    from agent_infra.capture.adapters.files import FileAdapter
     from agent_infra.memory.episodic import get_episodic_memory
     from agent_infra.monitor.task_registry import get_registry
 
@@ -102,6 +103,7 @@ async def _run_daemon(no_augment: bool = False) -> None:
     adapters = [
         ClipboardAdapter(bus=bus),
         ClaudeCodeAdapter(bus=bus),
+        FileAdapter(bus=bus),
     ]
 
     # 将每个适配器注册进健康监控（自动重启 = stop → start）
@@ -270,8 +272,17 @@ async def _catchup_missed_tasks() -> None:
 # ── 状态查看 ──────────────────────────────────────────────────────────────────
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(False, "--json", help="输出统一状态 JSON"),
+) -> None:
     """查看 Jarvis 系统状态。"""
+    if json_output:
+        from agent_infra.harness.status import build_status_payload
+        import json
+
+        console.print(json.dumps(build_status_payload(Path.cwd()), ensure_ascii=False, indent=2))
+        return
+
     console.print(Panel.fit("[bold]Jarvis 系统状态[/bold]", border_style="blue"))
 
     # 配置
@@ -726,6 +737,78 @@ def maintain(
                     console.print(f"  ✅ {fix}")
 
     asyncio.run(_run())
+
+
+# ── 验证闭环 ────────────────────────────────────────────────────────────────
+
+@app.command()
+def verify(
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合自动化读取"),
+    root: str = typer.Option(".", "--root", help="要验证的项目根目录"),
+) -> None:
+    """运行构建、lint、测试等验证闭环。"""
+    from agent_infra.harness.verification import report_to_json, run_verification, summarize_report
+
+    project_type, report = run_verification(Path(root).resolve())
+    output = report_to_json(project_type, report) if json_output else summarize_report(report)
+    console.print(output)
+    if not all(item.passed for item in report):
+        raise typer.Exit(1)
+
+
+@app.command()
+def audit(
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON，适合自动化读取"),
+    root: str = typer.Option(".", "--root", help="要审计的项目根目录"),
+) -> None:
+    """审计当前 agent harness 能力覆盖。"""
+    from agent_infra.harness.audit import run_harness_audit
+    import json
+
+    result = run_harness_audit(Path(root).resolve())
+    if json_output:
+        console.print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    console.print(f"Harness Audit: {result['overall_score']}/{result['max_score']}")
+    for item in result["categories"]:
+        status = "PASS" if item["passed"] else "FAIL"
+        console.print(f"- {item['category']}: {status} ({item['path']})")
+    if result["top_actions"]:
+        console.print("\nTop Actions:")
+        for action in result["top_actions"]:
+            console.print(f"- [{action['category']}] {action['action']} ({action['path']})")
+
+
+@app.command()
+def learn(
+    limit: int = typer.Option(50, "--limit", help="扫描最近多少条事件"),
+    min_repetitions: int = typer.Option(2, "--min-repetitions", help="重复多少次才提炼为技能"),
+) -> None:
+    """从近期事件中提炼可复用工作流。"""
+    from agent_infra.intelligence.learning import learn_recent_workflows
+
+    skills = learn_recent_workflows(limit=limit, min_repetitions=min_repetitions)
+    if not skills:
+        console.print("未发现足够稳定的重复工作流。")
+        return
+    console.print(f"新增 {len(skills)} 个技能:")
+    for skill in skills:
+        console.print(f"- {skill.name}: {skill.description}")
+
+
+@app.command()
+def adapters() -> None:
+    """列出当前已注册的 harness 适配层。"""
+    from agent_infra.harness.adapters import get_adapter_registry
+
+    for adapter in get_adapter_registry().list_adapters():
+        console.print(
+            f"- {adapter.name}: input={','.join(adapter.input_modes)} "
+            f"output={','.join(adapter.output_modes)} "
+            f"hooks={'yes' if adapter.supports_hooks else 'no'} "
+            f"sessions={'yes' if adapter.supports_sessions else 'no'}"
+        )
 
 
 # ── LLM 状态查看 ──────────────────────────────────────────────────────────────

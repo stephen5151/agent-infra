@@ -74,7 +74,11 @@ clipboard_min_length    = 50        # 少于50字不记录（过滤无意义复�
 # 文件监视
 file_watch_enabled      = true
 file_watch_paths        = ["~/Desktop", "~/Documents", "~/code"]
-file_watch_extensions   = [".py", ".js", ".ts", ".md", ".txt"]
+file_watch_extensions   = [
+  ".py", ".js", ".ts", ".md", ".txt",
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic",
+  ".mp4", ".mov", ".m4v", ".mp3", ".m4a", ".wav",
+]
 
 # Claude Code Hook（自动捕获所有 Claude Code 对话）
 claude_code_enabled     = true

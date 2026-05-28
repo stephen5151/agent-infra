@@ -95,7 +95,11 @@ class CaptureConfig(BaseModel):
     clipboard_min_length: int = 50
     file_watch_enabled: bool = True
     file_watch_paths: list[str] = ["~/Desktop", "~/Documents"]
-    file_watch_extensions: list[str] = [".py", ".js", ".ts", ".md", ".txt"]
+    file_watch_extensions: list[str] = [
+        ".py", ".js", ".ts", ".md", ".txt",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic",
+        ".mp4", ".mov", ".m4v", ".mp3", ".m4a", ".wav",
+    ]
     claude_code_enabled: bool = True
     cli_enabled: bool = True
     cli_ignore_commands: list[str] = ["ls", "pwd", "cd", "clear", "history"]

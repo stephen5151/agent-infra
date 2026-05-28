@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_infra.capture.adapters.base import BaseAdapter
 from agent_infra.capture.event_bus import CaptureEvent, EventSource, EventType
+from agent_infra.capture.media import MediaKind, build_file_capture_payload
 from agent_infra.config.settings import get_settings
 
 
@@ -60,8 +61,13 @@ class FileAdapter(BaseAdapter):
             if stat.st_size == 0 or stat.st_size > 1_000_000:
                 return  # 跳过空文件和超大文件
 
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-            content_hash = hashlib.md5(content.encode()).hexdigest()
+            payload = build_file_capture_payload(fpath)
+            if payload.media_kind == MediaKind.TEXT:
+                content_hash = hashlib.md5(payload.content.encode()).hexdigest()
+            else:
+                content_hash = hashlib.md5(
+                    f"{payload.metadata['path']}:{payload.metadata['size']}".encode()
+                ).hexdigest()
 
             if self._seen_hashes.get(fpath) == content_hash:
                 return
@@ -70,19 +76,15 @@ class FileAdapter(BaseAdapter):
 
             # 跳过隐私内容
             cfg = get_settings()
-            if cfg.privacy.is_sensitive(content[:500]):
+            if payload.media_kind == MediaKind.TEXT and cfg.privacy.is_sensitive(payload.content[:500]):
                 return
 
             event = CaptureEvent(
                 source=EventSource.FILE,
                 type=EventType.ACTION,
-                content=content[:3000],  # 最多前 3000 字符
-                importance=self._estimate_importance(fpath, content),
-                metadata={
-                    "path": str(fpath),
-                    "extension": fpath.suffix,
-                    "size": stat.st_size,
-                },
+                content=payload.content,
+                importance=self._estimate_importance(fpath, payload.content),
+                metadata=payload.metadata,
             )
             await self.emit(event)
         except (OSError, PermissionError):
@@ -128,6 +130,8 @@ class FileAdapter(BaseAdapter):
     def _estimate_importance(self, fpath: Path, content: str) -> float:
         """文件重要性估算。"""
         ext = fpath.suffix
+        if ext.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".mp4", ".mov", ".m4v", ".mp3", ".m4a", ".wav"}:
+            return 0.6  # 媒体文件先结构化入库，后续再做内容提取
         if ext in (".py", ".ts", ".js", ".rs", ".go"):
             return 0.7  # 代码文件
         if ext == ".md":
